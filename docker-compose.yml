@@ -1,0 +1,14 @@
+services:
+  assistant:
+    build: .
+    container_name: telegram-ai-assistant
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # دیتابیس روی Volume پایدار ذخیره می‌شود
+      DATABASE_PATH: /data/assistant.db
+    volumes:
+      - assistant_data:/data
+
+volumes:
+  assistant_data:
