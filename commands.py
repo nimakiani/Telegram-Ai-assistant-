@@ -433,6 +433,23 @@ class CommandHandler:
                 f"{r['id']}. [{r['keywords']}] ⟵ {clip(r['response'], 80)}" for r in rows
             )
         if sub == "add":
+            # چند پاسخ در یک پیام: هر خط «کلمات => پاسخ»
+            lines = [ln.strip() for ln in rest.splitlines() if ln.strip()]
+            lines = [
+                ln[len("/ai quick add"):].strip() if ln.lower().startswith("/ai quick add") else ln
+                for ln in lines
+            ]
+            if sum(1 for ln in lines if "=>" in ln) >= 2:
+                added = bad = 0
+                for ln in lines:
+                    kws, sep, resp = ln.partition("=>")
+                    kws = "|".join(k.strip() for k in kws.split("|") if k.strip())
+                    if not sep or not kws or not resp.strip():
+                        bad += 1
+                        continue
+                    await self.s.db.add_quick_reply(kws, resp.strip())
+                    added += 1
+                return f"✅ {added} پاسخ سریع اضافه شد." + (f" ({bad} خط نامعتبر نادیده گرفته شد)" if bad else "")
             if "=>" not in rest:
                 return "قالب: /ai quick add کلمه۱|کلمه۲ => متن پاسخ"
             kws, _, resp = rest.partition("=>")
