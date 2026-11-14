@@ -1,14 +1,24 @@
+# اجرای اختیاری با Docker. مراحل:
+#   1) cp .env.example .env
+#   2) docker compose run --rm assistant python main.py --setup     (ورود تعاملی؛ یک‌بار)
+#   3) docker compose up -d
 services:
   assistant:
     build: .
     container_name: telegram-ai-assistant
     restart: unless-stopped
     env_file: .env
+    stdin_open: true
+    tty: true
     environment:
-      # دیتابیس روی Volume پایدار ذخیره می‌شود
       DATABASE_PATH: /data/assistant.db
+      TG_SESSION_PATH: /data/session/assistant
+      LOCK_PATH: /data/assistant.lock
+      TEMP_DIR: /data/tmp
     volumes:
       - assistant_data:/data
+      # راهنمای راه‌اندازی تنظیمات را در .env می‌نویسد؛ باید روی میزبان ماندگار باشد
+      - ./.env:/app/.env
 
 volumes:
   assistant_data:

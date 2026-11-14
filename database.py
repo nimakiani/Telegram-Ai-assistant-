@@ -9,6 +9,12 @@ database.py — لایه‌ی دیتابیس SQLite.
   * messages              : تاریخچه‌ی مکالمه‌ی هر چت (کاربر / ربات / صاحب حساب) برای زمینه‌ی AI
   * chat_state            : چت‌هایی که ربات موقتاً در آن‌ها ساکت شده است (تحویل به انسان)
   * quick_replies         : پاسخ‌های سریع بر اساس کلمه‌ی کلیدی (بدون مصرف AI)
+  * chats                 : فهرست گفتگوهای دیده‌شده (نام، آخرین فعالیت)            [نسخه‌ی ۲]
+  * chat_settings         : تنظیمات مستقل هر گفتگو (فعال/غیرفعال، پرامپت، ...)       [نسخه‌ی ۲]
+  * schema_version        : شماره‌ی نسخه‌ی ساختار دیتابیس برای مهاجرت امن            [نسخه‌ی ۲]
+
+مهاجرت‌ها (migrations) هرگز داده‌ای حذف نمی‌کنند و قبل از اجرا یک نسخه‌ی پشتیبان کنار
+فایل دیتابیس (پوشه‌ی backups/) ساخته می‌شود.
 
 همه‌ی متدهای عمومی coroutine هستند؛ کوئری‌ها با asyncio.to_thread در ترد جدا و
 زیر یک Lock اجرا می‌شوند تا حلقه‌ی asyncio مسدود نشود.
@@ -17,6 +23,8 @@ database.py — لایه‌ی دیتابیس SQLite.
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import sqlite3
 import threading
 import time
@@ -48,6 +56,26 @@ KEY_MARK_READ = "mark_as_read"
 LIST_BLACK = "blacklist"
 LIST_WHITE = "whitelist"
 MODE_OFF = "off"
+
+# --- کلیدهای تازه (نسخه‌ی شخصی)
+KEY_MAX_STREAK = "max_consecutive_replies"
+KEY_MAX_MEDIA_MB = "max_media_mb"
+
+# در نسخه‌ی Business هر «اتصال» یک شناسه داشت؛ در نسخه‌ی شخصی فقط یک حساب داریم.
+ACCOUNT = "personal"
+
+SCHEMA_VERSION = 2
+logger = logging.getLogger(__name__)
+
+# فقط این کلیدها را می‌توان برای هر گفتگو جداگانه بازنویسی کرد: نام → (نوع، حداقل، حداکثر)
+CHAT_OVERRIDE_KEYS: dict[str, tuple[type, float, float]] = {
+    "history_size": (int, 0, 40),
+    "cooldown_seconds": (float, 0, 300),
+    "rate_limit_per_hour": (int, 0, 1000),
+    "pause_minutes": (int, 0, 10080),
+    "debounce_seconds": (float, 0, 30),
+    "max_consecutive_replies": (int, 0, 1000),
+}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -116,6 +144,25 @@ CREATE TABLE IF NOT EXISTS quick_replies (
 );
 """
 
+_SCHEMA_V2 = """
+CREATE TABLE IF NOT EXISTS chats (
+    chat_id       INTEGER PRIMARY KEY,
+    name          TEXT,
+    username      TEXT,
+    first_seen    INTEGER NOT NULL,
+    last_activity INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS chat_settings (
+    chat_id       INTEGER PRIMARY KEY,
+    ai_enabled    INTEGER,
+    custom_prompt TEXT,
+    overrides     TEXT,
+    ai_streak     INTEGER NOT NULL DEFAULT 0,
+    updated_at    INTEGER NOT NULL
+);
+"""
+
 # ستون‌هایی که در نسخه‌های قدیمی جدول logs نبودند (مهاجرت خودکار)
 _LOG_EXTRA_COLUMNS = (
     ("latency_ms", "INTEGER"),
@@ -136,17 +183,75 @@ class Database:
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._path = path
         with self._lock:
             self._conn.executescript(_SCHEMA)
             self._migrate()
             self._conn.commit()
 
     def _migrate(self) -> None:
-        """ستون‌های جدید را به جدول‌های قدیمی اضافه می‌کند (اگر لازم باشد)."""
+        """ساختار را با مهاجرت‌های شماره‌دار و امن به آخرین نسخه می‌رساند."""
+        # ستون‌های جدید جدول logs در نسخه‌های خیلی قدیمی
         existing = {r["name"] for r in self._conn.execute("PRAGMA table_info(logs)")}
         for name, ddl in _LOG_EXTRA_COLUMNS:
             if name not in existing:
                 self._conn.execute(f"ALTER TABLE logs ADD COLUMN {name} {ddl}")
+
+        self._conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
+        row = self._conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
+        current = row["v"] if row and row["v"] is not None else 1
+        if current >= SCHEMA_VERSION:
+            return
+        if self._has_user_data():
+            self._backup_before_migration(current)
+        if current < 2:
+            self._migrate_v2()
+        self._conn.execute("DELETE FROM schema_version")
+        self._conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+
+    def _has_user_data(self) -> bool:
+        for table in ("messages", "logs", "settings", "quick_replies", "access_list"):
+            if self._conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
+                return True
+        return False
+
+    def _backup_before_migration(self, from_version: int) -> None:
+        """قبل از مهاجرت، یک نسخه‌ی کامل از دیتابیس می‌گیرد (اگر دیتابیس روی دیسک باشد)."""
+        if self._path == ":memory:":
+            return
+        src = Path(self._path).expanduser()
+        backup_dir = src.parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        dest = backup_dir / f"{src.name}.pre-v{from_version + 1}-{int(time.time())}"
+        target = sqlite3.connect(str(dest))
+        try:
+            self._conn.commit()
+            self._conn.backup(target)
+        finally:
+            target.close()
+        try:
+            dest.chmod(0o600)
+        except OSError:
+            pass
+        logger.info("Database backup created before migration: %s", dest)
+
+    def _migrate_v2(self) -> None:
+        """نسخه‌ی ۲: جدول‌های chats/chat_settings و یکی‌کردن شناسه‌ی اتصال Business.
+
+        شناسه‌ی چت خصوصی در Bot API و MTProto یکی است؛ پس تاریخچه‌ی قبلی بدون تغییر
+        معنا برای حساب شخصی قابل استفاده است. هیچ ردیفی حذف نمی‌شود.
+        """
+        self._conn.executescript(_SCHEMA_V2)
+        for table in ("messages", "logs"):
+            self._conn.execute(
+                f"UPDATE {table} SET connection_id = ? WHERE connection_id IS NULL OR connection_id != ?",
+                (ACCOUNT, ACCOUNT),
+            )
+        # در chat_state کلید یکتا (connection_id, chat_id) است؛ ردیف‌های متعارض دست‌نخورده می‌مانند.
+        self._conn.execute(
+            "UPDATE OR IGNORE chat_state SET connection_id = ? WHERE connection_id != ?",
+            (ACCOUNT, ACCOUNT),
+        )
 
     # ------------------------------------------------------------------
     # ابزارهای داخلی
@@ -376,6 +481,8 @@ class Database:
             "DELETE FROM logs WHERE chat_id = ? OR user_id = ?", (user_id, user_id)
         )
         total += await self._arun("DELETE FROM chat_state WHERE chat_id = ?", (user_id,))
+        total += await self._arun("DELETE FROM chat_settings WHERE chat_id = ?", (user_id,))
+        total += await self._arun("DELETE FROM chats WHERE chat_id = ?", (user_id,))
         return total
 
     # ------------------------------------------------------------------
@@ -435,6 +542,114 @@ class Database:
 
     async def delete_quick_reply(self, reply_id: int) -> bool:
         return (await self._arun("DELETE FROM quick_replies WHERE id = ?", (reply_id,))) > 0
+
+    # ------------------------------------------------------------------
+    # گفتگوها (نسخه‌ی ۲)
+    # ------------------------------------------------------------------
+    async def touch_chat(self, chat_id: int, name: str | None, username: str | None) -> None:
+        """گفتگو را (در صورت نبود) ثبت و زمان آخرین فعالیت را به‌روز می‌کند."""
+        now = int(time.time())
+        await self._arun(
+            "INSERT INTO chats (chat_id, name, username, first_seen, last_activity) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT(chat_id) DO UPDATE SET "
+            "name = COALESCE(NULLIF(excluded.name, ''), chats.name), "
+            "username = COALESCE(excluded.username, chats.username), "
+            "last_activity = excluded.last_activity",
+            (chat_id, name or "", username, now, now),
+        )
+
+    async def get_chat(self, chat_id: int) -> sqlite3.Row | None:
+        return await self._arun("SELECT * FROM chats WHERE chat_id = ?", (chat_id,), "one")
+
+    async def list_chats(self, limit: int = 20) -> list[sqlite3.Row]:
+        return await self._arun(
+            "SELECT * FROM chats ORDER BY last_activity DESC LIMIT ?", (limit,), "all"
+        )
+
+    async def find_chat_by_username(self, username: str) -> sqlite3.Row | None:
+        return await self._arun(
+            "SELECT * FROM chats WHERE lower(username) = lower(?)",
+            (username.lstrip("@"),),
+            "one",
+        )
+
+    # ------------------------------------------------------------------
+    # تنظیمات مستقل هر گفتگو (نسخه‌ی ۲)
+    # ------------------------------------------------------------------
+    async def get_chat_settings(self, chat_id: int) -> dict[str, Any]:
+        """{ai_enabled: bool|None, custom_prompt: str, overrides: dict, ai_streak: int}"""
+        row = await self._arun(
+            "SELECT * FROM chat_settings WHERE chat_id = ?", (chat_id,), "one"
+        )
+        if row is None:
+            return {"ai_enabled": None, "custom_prompt": "", "overrides": {}, "ai_streak": 0}
+        try:
+            overrides = json.loads(row["overrides"] or "{}")
+            if not isinstance(overrides, dict):
+                overrides = {}
+        except ValueError:
+            overrides = {}
+        enabled = row["ai_enabled"]
+        return {
+            "ai_enabled": None if enabled is None else bool(enabled),
+            "custom_prompt": row["custom_prompt"] or "",
+            "overrides": overrides,
+            "ai_streak": int(row["ai_streak"] or 0),
+        }
+
+    async def _ensure_chat_settings(self, chat_id: int) -> None:
+        await self._arun(
+            "INSERT OR IGNORE INTO chat_settings (chat_id, updated_at) VALUES (?, ?)",
+            (chat_id, int(time.time())),
+        )
+
+    async def set_chat_ai_enabled(self, chat_id: int, enabled: bool | None) -> None:
+        await self._ensure_chat_settings(chat_id)
+        await self._arun(
+            "UPDATE chat_settings SET ai_enabled = ?, updated_at = ? WHERE chat_id = ?",
+            (None if enabled is None else int(enabled), int(time.time()), chat_id),
+        )
+
+    async def set_chat_prompt(self, chat_id: int, prompt: str) -> None:
+        await self._ensure_chat_settings(chat_id)
+        await self._arun(
+            "UPDATE chat_settings SET custom_prompt = ?, updated_at = ? WHERE chat_id = ?",
+            (prompt, int(time.time()), chat_id),
+        )
+
+    async def set_chat_override(self, chat_id: int, key: str, value: float | int | None) -> None:
+        """مقدار None یعنی حذف بازنویسی و بازگشت به تنظیم کلی."""
+        if key not in CHAT_OVERRIDE_KEYS:
+            raise KeyError(key)
+        current = (await self.get_chat_settings(chat_id))["overrides"]
+        if value is None:
+            current.pop(key, None)
+        else:
+            current[key] = value
+        await self._ensure_chat_settings(chat_id)
+        await self._arun(
+            "UPDATE chat_settings SET overrides = ?, updated_at = ? WHERE chat_id = ?",
+            (json.dumps(current, ensure_ascii=False), int(time.time()), chat_id),
+        )
+
+    async def bump_streak(self, chat_id: int) -> int:
+        """شمارنده‌ی پاسخ‌های متوالی هوش مصنوعی را یکی زیاد می‌کند و مقدار جدید را برمی‌گرداند."""
+        await self._ensure_chat_settings(chat_id)
+        await self._arun(
+            "UPDATE chat_settings SET ai_streak = ai_streak + 1 WHERE chat_id = ?", (chat_id,)
+        )
+        row = await self._arun(
+            "SELECT ai_streak FROM chat_settings WHERE chat_id = ?", (chat_id,), "one"
+        )
+        return int(row["ai_streak"])
+
+    async def reset_streak(self, chat_id: int) -> None:
+        await self._arun("UPDATE chat_settings SET ai_streak = 0 WHERE chat_id = ?", (chat_id,))
+
+    async def clear_pause_for_chat(self, chat_id: int) -> bool:
+        removed = await self._arun("DELETE FROM chat_state WHERE chat_id = ?", (chat_id,)) > 0
+        await self.reset_streak(chat_id)
+        return removed
 
     # ------------------------------------------------------------------
     def close(self) -> None:

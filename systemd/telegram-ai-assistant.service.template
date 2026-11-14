@@ -1,0 +1,26 @@
+# قالب سرویس systemd سطح کاربر — با ./service.sh install پر و نصب می‌شود (دستی ویرایش نکنید).
+[Unit]
+Description=Telegram AI Assistant (personal account, Telethon)
+After=network-online.target
+Wants=network-online.target
+# حداکثر ۵ بار تلاش مجدد در ۱۰ دقیقه؛ بعد از آن سرویس «failed» می‌شود و چرخه‌ی بی‌پایان نداریم
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=__PROJECT_DIR__
+ExecStart=__PROJECT_DIR__/venv/bin/python __PROJECT_DIR__/main.py
+# فقط در خروج‌های غیرعادی ری‌استارت می‌شود؛ stop دستی (SIGTERM → کد ۰) دوباره اجرا نمی‌شود
+Restart=on-failure
+RestartSec=15
+# 1 = تنظیمات ناقص، 3 = نشست نامعتبر (نیاز به ورود دوباره)، 5 = نمونه‌ی دیگری در حال اجراست
+# در این حالت‌ها تلاش مجدد بی‌فایده است
+RestartPreventExitStatus=1 3 5
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=yes
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

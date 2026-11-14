@@ -1,10 +1,17 @@
 .env
+.env.*
+!.env.example
 .git
 .gitignore
 __pycache__/
 *.pyc
 venv/
 .venv/
+venv.broken.*/
 data/
+backups/
 *.db
+*.session*
+*.log
+tests/
 README.md
