@@ -17,6 +17,8 @@ import re
 from pathlib import Path
 from typing import Any, Callable
 
+from about import APP_NAME, CREATOR_LINE, VERSION
+from botapi import BotApi, BotApiError
 from envfile import mask, read_env, update_env
 from schedule import normalize_digits
 from tglayer.models import AuthError, ChatInfo, GatewayError
@@ -51,6 +53,7 @@ class Wizard:
         client_factory: Callable[..., Any] | None = None,
         gateway_factory: Callable[..., Any] | None = None,
         ai_factory: Callable[[Any], Any] | None = None,
+        bot_factory: Callable[[str], Any] | None = None,
     ) -> None:
         self.dir = project_dir
         self.env_path = project_dir / ".env"
@@ -61,6 +64,7 @@ class Wizard:
             lambda api_id, api_hash, session: TelethonGateway(api_id, api_hash, session, client_factory)
         )
         self._ai_factory = ai_factory
+        self._bot_factory = bot_factory or BotApi
         self.env: dict[str, str] = read_env(self.env_path)
         self.report: list[str] = []
 
@@ -251,6 +255,26 @@ class Wizard:
                 return
             self.out("❌ نام مدل لازم است.")
 
+    def step_panel(self) -> None:
+        """گام اختیاری: ربات پنل کنترل با دکمه‌های شیشه‌ای (بدون شماره‌گذاری مرحله‌ها)."""
+        self.out(
+            "\n━━━ گام اختیاری: پنل ربات با دکمه‌های شیشه‌ای ━━━\n"
+            "اگر می‌خواهید دستیار را با یک ربات تلگرام و دکمه‌ها کنترل کنید:\n"
+            "  ۱) در تلگرام @BotFather را باز کنید و /newbot را بزنید\n"
+            "  ۲) توکن ربات (شبیه 123456:ABC…) را اینجا بچسبانید\n"
+            "برای رد‌شدن فقط Enter بزنید (بعداً: ./venv/bin/python main.py --set PANEL_BOT_TOKEN=…)."
+        )
+        current = self.env.get("PANEL_BOT_TOKEN", "")
+        while True:
+            token = self._prompt("توکن ربات پنل", current, secret=True)
+            if not token:
+                return
+            if re.fullmatch(r"\d{5,}:[A-Za-z0-9_-]{30,}", token):
+                self._save(PANEL_BOT_TOKEN=token)
+                self.report.append("پنل ربات: فعال (بعد از اجرا، در تلگرام ربات را باز کنید و /start بزنید)")
+                return
+            self.out("❌ قالب توکن درست نیست؛ دوباره کپی کنید یا Enter بزنید تا رد شود.")
+
     async def step_test(self) -> bool:
         self._step(11, "آزمایش اتصال تلگرام و هوش مصنوعی")
         from dotenv import load_dotenv
@@ -290,6 +314,12 @@ class Wizard:
             self.out(f"❌ هوش مصنوعی: {type(exc).__name__}: {str(exc)[:200]}\n"
                      "   کلید، آدرس API و نام مدل را بررسی کنید (python main.py --setup برای تکرار).")
             ok = False
+        if cfg.panel_bot_token:
+            try:
+                me = await self._bot_factory(cfg.panel_bot_token).call("getMe")
+                self.out(f"✅ پنل ربات: @{me.get('username')} آماده است — در تلگرام بازش کنید و /start بزنید.")
+            except BotApiError as exc:
+                self.out(f"❌ پنل ربات: {exc.description} — توکن را بررسی کنید (اختیاری است؛ بقیه‌ی برنامه کار می‌کند).")
         return ok
 
     def step_report(self, ok: bool) -> None:
@@ -307,7 +337,7 @@ class Wizard:
 
     # ------------------------------------------------------------------ اجرا
     async def run_async(self) -> int:
-        self.out("═" * 54 + "\n  راه‌اندازی دستیار هوشمند تلگرام (حساب شخصی)\n" + "═" * 54)
+        self.out("═" * 54 + f"\n  راه‌اندازی {APP_NAME} — نسخه‌ی {VERSION}\n  {CREATOR_LINE}\n" + "═" * 54)
         self.out("این برنامه با حساب عادی شما کار می‌کند؛ Premium و ساخت ربات (BotFather) لازم نیست.")
         self.step_api_id()
         self.step_api_hash()
@@ -318,6 +348,7 @@ class Wizard:
         provider = self.step_ai()
         self.step_api_key(provider)
         self.step_model(provider)
+        self.step_panel()
         ok = await self.step_test()
         self.step_report(ok)
         return 0 if ok else 2

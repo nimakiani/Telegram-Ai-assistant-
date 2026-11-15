@@ -60,6 +60,9 @@ MODE_OFF = "off"
 # --- کلیدهای تازه (نسخه‌ی شخصی)
 KEY_MAX_STREAK = "max_consecutive_replies"
 KEY_MAX_MEDIA_MB = "max_media_mb"
+KEY_SILENT_UNTIL = "silent_until"  # حالت سکوت موقت (زمان یونیکس پایان)
+KEY_PANEL_NOTIFY = "panel_notify"  # ارسال اعلان‌ها به ربات پنل
+KEY_PANEL_CHAT = "panel_chat_id"  # گفتگوی صاحب حساب با ربات پنل (بعد از /start)
 
 # در نسخه‌ی Business هر «اتصال» یک شناسه داشت؛ در نسخه‌ی شخصی فقط یک حساب داریم.
 ACCOUNT = "personal"

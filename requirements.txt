@@ -4,4 +4,3 @@ openai>=1.40,<3.0
 python-dotenv>=1.0,<2.0
 # پایگاه‌داده‌ی منطقه‌های زمانی (برای Asia/Tehran روی سیستم‌هایی که tzdata ندارند)
 tzdata>=2024.1
-python-socks[asyncio]>=2.0
