@@ -158,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
         return app.EXIT_AUTH
 
     setup_logging(cfg.log_level, [cfg.tg_api_hash, cfg.ai_api_key, cfg.stt_api_key,
-                                  cfg.ai_fallback_api_key or ""])
+                                  cfg.ai_fallback_api_key or "", cfg.panel_bot_token or ""])
     try:
         return asyncio.run(app.run(cfg))
     except KeyboardInterrupt:

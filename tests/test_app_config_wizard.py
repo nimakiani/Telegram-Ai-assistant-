@@ -127,7 +127,7 @@ class WizardTests(unittest.IsolatedAsyncioTestCase):
         wiz, answers, secrets = self.make(
             answers=["۱۲۳۴۵۶۷", "+989121234567", "00000", "12345", "3", "2", "1", "", ],
             #        api id      phone            bad    good   white  pick#2 openai model(Enter)
-            secrets=[self.HASH, "my-2fa-password", "sk-SECRET-KEY-123456"],
+            secrets=[self.HASH, "my-2fa-password", "sk-SECRET-KEY-123456", ""],
             client=client, chats=chats,
         )
         # ترتیب secrets: api_hash، رمز دومرحله‌ای (داخل login)، کلید AI

@@ -13,7 +13,7 @@ import re
 import tempfile
 from pathlib import Path
 
-SENSITIVE_KEYS = {"TG_API_HASH", "AI_API_KEY", "AI_FALLBACK_API_KEY", "TRANSCRIPTION_API_KEY"}
+SENSITIVE_KEYS = {"TG_API_HASH", "AI_API_KEY", "AI_FALLBACK_API_KEY", "TRANSCRIPTION_API_KEY", "PANEL_BOT_TOKEN"}
 _LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$")
 
 

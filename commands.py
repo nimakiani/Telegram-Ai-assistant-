@@ -11,6 +11,7 @@ commands.py — پنل مدیریت متنی (جایگزین پنل دکمه‌�
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import logging
@@ -34,6 +35,7 @@ from database import (
     KEY_PAUSE_MINUTES,
     KEY_RATE_LIMIT,
     KEY_SCHEDULE_MODE,
+    KEY_SILENT_UNTIL,
     KEY_SYSTEM_PROMPT,
     KEY_TIMEZONE,
     KEY_VISION,
@@ -46,6 +48,7 @@ from database import (
     MODE_OFF,
 )
 from engine import Engine
+from personas import PERSONAS
 from media import MediaTooLarge, _download_bytes
 from schedule import (
     MODE_INSIDE,
@@ -108,6 +111,11 @@ HELP_TEXT = """🤖 دستورهای دستیار (فقط در «Saved Messages�
 /ai chat <گفتگو> set <history|cooldown|debounce|rate|pause|streak> <عدد>
 /ai chat <گفتگو> unset <کلید> | forget
 («گفتگو» = شناسه‌ی عددی یا @username)
+
+▫️ ابزارها
+/ai silent 60 — سکوت موقت دستیار (دقیقه)؛ /ai silent off برای لغو
+/ai persona list | <کلید> — اعمال قالب آماده‌ی پرامپت
+/ai test — آزمایش اتصال هوش مصنوعی
 
 ▫️ گزارش
 /ai stats — آمار
@@ -178,7 +186,8 @@ class CommandHandler:
             "chats": self._cmd_chats, "paused": self._cmd_paused, "pause": self._cmd_pause,
             "resume": self._cmd_resume, "chat": self._cmd_chat, "stats": self._cmd_stats,
             "logs": self._cmd_logs, "csv": self._cmd_csv, "clearlogs": self._cmd_clearlogs,
-            "forget": self._cmd_forget,
+            "forget": self._cmd_forget, "silent": self._cmd_silent,
+            "persona": self._cmd_persona, "test": self._cmd_test,
         }
 
     # ------------------------------------------------------------------
@@ -188,19 +197,28 @@ class CommandHandler:
         if not (text == PREFIX or text.startswith(PREFIX + " ") or text.startswith(PREFIX + "\n")):
             return False
         name, _, args = _split(text[len(PREFIX):])
-        name = name.lower()
-        handler = self._table.get(name)
-        if handler is None:
-            await self.engine.send_to_self(f"❓ دستور «{name}» را نمی‌شناسم. /ai help")
-            return True
-        try:
-            reply = await handler(args.strip(), msg)
-        except Exception:  # noqa: BLE001
-            logger.exception("Command %r failed", name)
-            reply = "⚠️ اجرای دستور با خطا مواجه شد (جزئیات در لاگ برنامه)."
+        reply = await self._run(name.lower(), args, msg)
         if reply:
             await self.engine.send_to_self(reply)
         return True
+
+    async def _run(self, name: str, args: str, msg: OwnerMessage | None) -> str | None:
+        handler = self._table.get(name)
+        if handler is None:
+            return f"❓ دستور «{name}» را نمی‌شناسم. /ai help"
+        try:
+            return await handler(args.strip(), msg)  # type: ignore[arg-type]
+        except Exception:  # noqa: BLE001
+            logger.exception("Command %r failed", name)
+            return "⚠️ اجرای دستور با خطا مواجه شد (جزئیات در لاگ برنامه)."
+
+    async def execute(self, line: str) -> str | None:
+        """اجرای یک دستور بدون ارسال پاسخ؛ متن پاسخ برگردانده می‌شود (برای پنل ربات). مثال: "pause 123 30"."""
+        line = line.strip()
+        if line.startswith(PREFIX):
+            line = line[len(PREFIX):]
+        name, _, args = _split(normalize_digits(line))
+        return await self._run(name.lower(), args, None)
 
     # ------------------------------------------------------------------
     # کمکی‌ها
@@ -262,10 +280,17 @@ class CommandHandler:
             f"ساعت کاری: {sched_mode} | الان {'در' if working else 'خارج از'} ساعت کاری "
             f"→ {'پاسخ می‌دهد' if allowed else 'پاسخ نمی‌دهد'}\n"
             f"({sched['start']:%H:%M}-{sched['end']:%H:%M}, {format_days(sched['days'])}, {sched['tz']})\n"
+            f"{await self._silent_line()}"
             f"گفتگوهای ساکت: {len(pauses)} | پاسخ سریع: {quick} | دانش: {len(knowledge)} نویسه\n"
             f"زمان محلی: {format_local_now(sched['tz'])}\n\n"
             "راهنما: /ai help"
         )
+
+    async def _silent_line(self) -> str:
+        until = await self.s.db.get_int(KEY_SILENT_UNTIL, 0)
+        if until > time.time():
+            return f"🌙 حالت سکوت: {max(1, int((until - time.time()) / 60))} دقیقه‌ی دیگر\n"
+        return ""
 
     async def _cmd_on(self, args: str, msg: OwnerMessage) -> str:
         await self.s.db.set_setting(KEY_ENABLED, "1")
@@ -319,7 +344,7 @@ class CommandHandler:
             await self.s.db.set_setting(KEY_KNOWLEDGE, "")
             return "🗑 دانش پاک شد."
         if sub in ("set", "add"):
-            if msg.media is not None:  # فایل ضمیمه
+            if msg is not None and msg.media is not None:  # فایل ضمیمه
                 return await self._knowledge_from_file(sub, msg)
             if not text.strip():
                 return "متن را بعد از دستور بنویسید یا یک فایل txt/md با این کپشن بفرستید."
@@ -433,23 +458,6 @@ class CommandHandler:
                 f"{r['id']}. [{r['keywords']}] ⟵ {clip(r['response'], 80)}" for r in rows
             )
         if sub == "add":
-            # چند پاسخ در یک پیام: هر خط «کلمات => پاسخ»
-            lines = [ln.strip() for ln in rest.splitlines() if ln.strip()]
-            lines = [
-                ln[len("/ai quick add"):].strip() if ln.lower().startswith("/ai quick add") else ln
-                for ln in lines
-            ]
-            if sum(1 for ln in lines if "=>" in ln) >= 2:
-                added = bad = 0
-                for ln in lines:
-                    kws, sep, resp = ln.partition("=>")
-                    kws = "|".join(k.strip() for k in kws.split("|") if k.strip())
-                    if not sep or not kws or not resp.strip():
-                        bad += 1
-                        continue
-                    await self.s.db.add_quick_reply(kws, resp.strip())
-                    added += 1
-                return f"✅ {added} پاسخ سریع اضافه شد." + (f" ({bad} خط نامعتبر نادیده گرفته شد)" if bad else "")
             if "=>" not in rest:
                 return "قالب: /ai quick add کلمه۱|کلمه۲ => متن پاسخ"
             kws, _, resp = rest.partition("=>")
@@ -665,7 +673,8 @@ class CommandHandler:
             )
         return "📜 آخرین لاگ‌ها (UTC)\n\n" + "\n\n".join(out)
 
-    async def _cmd_csv(self, args: str, msg: OwnerMessage) -> str | None:
+    async def csv_bytes(self) -> tuple[bytes, int]:
+        """محتوای CSV لاگ‌ها (با BOM برای اکسل) و تعداد ردیف‌ها."""
         rows = await self.s.db.export_logs()
         buf = io.StringIO()
         writer = csv.writer(buf)
@@ -676,10 +685,48 @@ class CommandHandler:
                 fmt_ts(r["ts"]), r["user_id"], r["username"], r["full_name"], r["user_text"],
                 r["bot_reply"], r["status"], r["latency_ms"], r["prompt_tokens"],
                 r["completion_tokens"], r["model"])])
-        await self.engine.send_file_to_self(
-            buf.getvalue().encode("utf-8-sig"), "logs.csv", f"{len(rows)} ردیف لاگ"  # BOM برای اکسل
-        )
+        return buf.getvalue().encode("utf-8-sig"), len(rows)
+
+    async def _cmd_csv(self, args: str, msg: OwnerMessage) -> str | None:
+        data, count = await self.csv_bytes()
+        await self.engine.send_file_to_self(data, "logs.csv", f"{count} ردیف لاگ")
         return None
+
+    async def _cmd_silent(self, args: str, msg: OwnerMessage | None) -> str:
+        raw = normalize_digits(args.strip().lower())
+        if raw in ("off", "0", "لغو"):
+            await self.s.db.set_setting(KEY_SILENT_UNTIL, "0")
+            return "🔔 حالت سکوت لغو شد؛ دستیار دوباره پاسخ می‌دهد."
+        if not raw.isdigit() or not 1 <= int(raw) <= 10080:
+            until = await self.s.db.get_int(KEY_SILENT_UNTIL, 0)
+            now = f"الان: سکوت تا {max(1, int((until - time.time()) / 60))} دقیقه‌ی دیگر\n" if until > time.time() else ""
+            return f"{now}استفاده: /ai silent <دقیقه از ۱ تا ۱۰۰۸۰> | off"
+        until = int(time.time() + int(raw) * 60)
+        await self.s.db.set_setting(KEY_SILENT_UNTIL, str(until))
+        return f"🌙 دستیار برای {raw} دقیقه ساکت شد (پاسخ‌های در حال ساخت هم ارسال نمی‌شوند)."
+
+    async def _cmd_persona(self, args: str, msg: OwnerMessage | None) -> str:
+        key = args.strip().lower()
+        if key in PERSONAS:
+            title, prompt = PERSONAS[key]
+            await self.s.db.set_setting(KEY_SYSTEM_PROMPT, prompt)
+            return f"✅ قالب «{title}» به‌عنوان پرامپت ذخیره شد. (ویرایش: /ai prompt set …)"
+        lines = [f"• {k} — {title}" for k, (title, _) in PERSONAS.items()]
+        return "🎭 قالب‌های آماده:\n" + "\n".join(lines) + "\n\nاعمال: /ai persona <کلید>"
+
+    async def _cmd_test(self, args: str, msg: OwnerMessage | None) -> str:
+        started = time.monotonic()
+        try:
+            result = await asyncio.wait_for(
+                self.s.ai.generate_reply(
+                    "فقط یک جمله‌ی کوتاه فارسی بنویس.", [], [("text", "سلام! خودت را در یک جمله معرفی کن.")]
+                ),
+                timeout=60,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"❌ آزمایش هوش مصنوعی ناموفق بود: {type(exc).__name__}: {clip(str(exc), 200)}"
+        ms = int((time.monotonic() - started) * 1000)
+        return f"✅ مدل «{result.model}» در {ms} میلی‌ثانیه پاسخ داد:\n{clip(result.text, 400)}"
 
     async def _cmd_clearlogs(self, args: str, msg: OwnerMessage) -> str:
         return f"🗑 {await self.s.db.clear_logs()} ردیف لاگ حذف شد."

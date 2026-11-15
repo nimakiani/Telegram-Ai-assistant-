@@ -178,35 +178,7 @@ def secure_session_files(session_path: str) -> None:
             with contextlib.suppress(OSError):
                 os.chmod(p, stat.S_IRUSR | stat.S_IWUSR)
 
-def _resolve_proxy() -> tuple | None:
-    """پروکسی تلگرام را از TG_PROXY می‌خواند (نمونه: socks5://127.0.0.1:10808).
 
-    * اگر TG_PROXY خالی باشد، از ALL_PROXY / HTTPS_PROXY محیط استفاده می‌شود.
-    * TG_PROXY=none یعنی بدون پروکسی.
-    """
-    from urllib.parse import unquote, urlsplit
-
-    raw = (os.environ.get("TG_PROXY") or "").strip()
-    if raw.lower() in ("none", "off", "false", "0"):
-        return None
-    if not raw:
-        for name in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy"):
-            raw = (os.environ.get(name) or "").strip()
-            if raw:
-                break
-    if not raw:
-        return None
-    if "://" not in raw:
-        raw = "socks5://" + raw
-    parts = urlsplit(raw)
-    kinds = {"socks": "socks5", "socks5": "socks5", "socks5h": "socks5",
-             "socks4": "socks4", "http": "http", "https": "http"}
-    kind = kinds.get(parts.scheme.lower())
-    if kind is None or not parts.hostname or not parts.port:
-        raise ValueError(f"TG_PROXY نامعتبر است: {raw!r} (نمونه: socks5://127.0.0.1:10808)")
-    user = unquote(parts.username) if parts.username else None
-    password = unquote(parts.password) if parts.password else None
-    return (kind, parts.hostname, parts.port, True, user, password)
 def _make_client(api_id: int, api_hash: str, session_path: str) -> Any:
     from telethon import TelegramClient  # import تنبل: فقط وقتی واقعاً لازم است
 
@@ -222,7 +194,6 @@ def _make_client(api_id: int, api_hash: str, session_path: str) -> Any:
         auto_reconnect=True,
         device_model="Telegram AI Assistant",
         app_version="2.0",
-        proxy=_resolve_proxy(),
     )
     client.parse_mode = None  # متن ساده: «*» و «_» در پاسخ مدل نباید قالب‌بندی شوند
     return client

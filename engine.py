@@ -31,7 +31,7 @@ import contextlib
 import logging
 import time
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Any, Awaitable, Callable, Protocol
 
 from ai_handler import AIError
 from database import (
@@ -48,6 +48,7 @@ from database import (
     KEY_MAX_STREAK,
     KEY_PAUSE_MINUTES,
     KEY_RATE_LIMIT,
+    KEY_SILENT_UNTIL,
     KEY_SYSTEM_PROMPT,
     KEY_TIMEZONE,
     LIST_BLACK,
@@ -144,6 +145,8 @@ class Engine:
         self.commands: CommandHandlerProtocol | None = None
         self._tasks: set[asyncio.Task] = set()
         self.last_owner_task: asyncio.Task | None = None  # (برای تست‌ها)
+        # اعلان اختیاری به ربات پنل: async (text, actions|None) -> None ؛ actions = [(برچسب, callback_data)]
+        self.panel_push: Callable[[str, list[tuple[str, str]] | None], Awaitable[None]] | None = None
 
     # ------------------------------------------------------------------
     # اتصال به Gateway
@@ -239,6 +242,8 @@ class Engine:
                     return CANCELLED, "chat paused"
                 if not await s.db.get_bool(KEY_ENABLED, True):
                     return CANCELLED, "assistant disabled"
+                if await self._is_silent():
+                    return CANCELLED, "silent mode"
                 blocked = s.send_blocked_until - time.monotonic()
                 if blocked > 0:
                     wait = blocked
@@ -271,8 +276,18 @@ class Engine:
         if wait > 0:
             await asyncio.sleep(wait)
 
-    async def _notify_owner(self, text: str) -> None:
+    async def _notify_owner(self, text: str, actions: list[tuple[str, str]] | None = None) -> None:
+        """اعلان به صاحب حساب: همیشه «Saved Messages»؛ در صورت فعال‌بودن پنل، ربات (با دکمه) هم."""
         await self.send_to_self(text)
+        if self.panel_push is not None:
+            try:
+                await self.panel_push(text, actions)
+            except Exception:  # noqa: BLE001 — خرابی پنل نباید دستیار را مختل کند
+                logger.exception("Panel push failed")
+
+    async def _is_silent(self) -> bool:
+        until = await self.s.db.get_int(KEY_SILENT_UNTIL, 0)
+        return until > time.time()
 
     # ------------------------------------------------------------------
     # پیام صاحب حساب
@@ -352,6 +367,8 @@ class Engine:
         s = self.s
         if not await s.db.get_bool(KEY_ENABLED, True):
             return False, "disabled"
+        if await self._is_silent():
+            return False, "silent"
         if cs["ai_enabled"] is False:
             return False, "chat_disabled"
         if not await self._is_allowed(user_id):
@@ -501,7 +518,8 @@ class Engine:
             await self._notify_owner(
                 f"⏸ سقف {max_streak} پاسخ متوالی دستیار در گفتگو با «{batch.sender_name}» "
                 f"({chat_id}) رسید؛ دستیار تا {fmt_ts(int(time.time() + minutes * 60))} UTC "
-                f"در این گفتگو ساکت می‌ماند.\nبرای ادامه‌ی فوری: /ai resume {chat_id}"
+                f"در این گفتگو ساکت می‌ماند.\nبرای ادامه‌ی فوری: /ai resume {chat_id}",
+                [("▶️ فعال‌سازی دوباره", f"c:{chat_id}:rs"), ("💬 مشاهده‌ی گفتگو", f"c:{chat_id}")],
             )
             return
 
@@ -607,5 +625,6 @@ class Engine:
                 f"کاربر: {who}{handle} — شناسه: {chat_id}\n"
                 f"آخرین پیام: {clip(user_text, 200)}\n"
                 f"دستیار تا {fmt_ts(until)} UTC در این گفتگو ساکت می‌ماند.\n"
-                f"برای فعال‌سازی زودتر: /ai resume {chat_id}"
+                f"برای فعال‌سازی زودتر: /ai resume {chat_id}",
+                [("▶️ فعال‌سازی دوباره", f"c:{chat_id}:rs"), ("💬 مشاهده‌ی گفتگو", f"c:{chat_id}")],
             )

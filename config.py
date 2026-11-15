@@ -92,6 +92,7 @@ class Config:
     tg_api_hash: str
     tg_phone: str | None
     session_path: str
+    panel_bot_token: str | None
     # --- هوش مصنوعی (اصلی)
     ai_api_key: str
     ai_base_url: str | None
@@ -166,6 +167,10 @@ def load_config(require_telegram: bool = True, require_ai: bool = True) -> Confi
     elif api_hash and not re.fullmatch(r"[0-9a-fA-F]{32}", api_hash):
         problems.append("TG_API_HASH باید یک رشته‌ی ۳۲ نویسه‌ای هگزادسیمال باشد.")
 
+    panel_token = _env("PANEL_BOT_TOKEN")
+    if panel_token and not re.fullmatch(r"\d{5,}:[A-Za-z0-9_-]{30,}", panel_token):
+        problems.append("PANEL_BOT_TOKEN قالب درستی ندارد (باید شبیه 123456:ABC… باشد؛ از @BotFather بگیرید یا خالی بگذارید).")
+
     ai_api_key = _env("AI_API_KEY")
     if require_ai and not ai_api_key:
         problems.append(
@@ -203,6 +208,7 @@ def load_config(require_telegram: bool = True, require_ai: bool = True) -> Confi
         tg_api_id=api_id,
         tg_api_hash=api_hash,
         tg_phone=_env("TG_PHONE"),
+        panel_bot_token=panel_token,
         session_path=_env("TG_SESSION_PATH", "data/session/assistant") or "data/session/assistant",
         ai_api_key=ai_api_key or "",
         ai_base_url=_env("AI_BASE_URL"),

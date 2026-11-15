@@ -33,6 +33,7 @@ from database import (
     KEY_MARK_READ,
     KEY_MAX_MEDIA_MB,
     KEY_MAX_STREAK,
+    KEY_PANEL_NOTIFY,
     KEY_PAUSE_MINUTES,
     KEY_RATE_LIMIT,
     KEY_SCHEDULE_MODE,
@@ -46,7 +47,9 @@ from database import (
     MODE_OFF,
     Database,
 )
+from botapi import BotApi
 from engine import Engine
+from panel import Panel
 from services import AIProtocol, Services
 from tglayer.models import AuthError, Gateway, GatewayError
 from tglayer.telethon_gateway import TelethonGateway
@@ -89,6 +92,7 @@ async def seed_defaults(db: Database, cfg: Config) -> None:
             KEY_VISION: _flag(cfg.vision_enabled),
             KEY_VOICE: _flag(cfg.voice_enabled),
             KEY_MARK_READ: _flag(cfg.mark_as_read),
+            KEY_PANEL_NOTIFY: "1",
         }
     )
 
@@ -148,6 +152,7 @@ async def run(
     gateway = (gateway_factory or _default_gateway)(config)
     stop = stop or asyncio.Event()
     engine: Engine | None = None
+    panel_task: asyncio.Future | None = None
     try:
         await seed_defaults(db, config)
         ai = AIHandler(config)
@@ -169,8 +174,16 @@ async def run(
             logger.error("اتصال اولیه به تلگرام ناموفق: %s", exc)
             return EXIT_CONNECTION
         logger.info("وصل شد به حساب «%s» (id=%s)", services.me.name, services.me.user_id)
+        if config.panel_bot_token:
+            panel = Panel(services, engine, _commands, BotApi(config.panel_bot_token))
+            engine.panel_push = panel.push
+            panel_task = asyncio.ensure_future(panel.run())
         return await _supervise(gateway, services, stop)
     finally:
+        if panel_task is not None:
+            panel_task.cancel()
+            with contextlib.suppress(BaseException):
+                await panel_task
         if engine is not None:
             await engine.shutdown()
         with contextlib.suppress(Exception):
